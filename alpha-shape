@@ -1,0 +1,147 @@
+import numpy as np
+import smplx
+import torch
+from scipy.spatial import distance
+import alphashape
+import matplotlib.pyplot as plt
+
+
+
+def point_alphashape(points_org, delete_arm):
+
+    def skip_diag_strided(A): 
+        m = A.shape[0] 
+        strided = np.lib.stride_tricks.as_strided 
+        s0,s1 = A.strides 
+        return strided(A.ravel()[1:], shape=(m-1,m), strides=(s0+s1,s1)).reshape(m,-1) 
+    # ############# alpha shape #################
+
+    # path='datafile/verts_ce_afterpose.txt'
+    # points = np.loadtxt(path)
+    body_new_idx = np.loadtxt("json/body_new_idx.txt",dtype=int)      # except arms points
+    if delete_arm:                                                               
+        points = points_org[body_new_idx]
+    else:
+        points = points_org
+
+    dist = distance.cdist(points,points)
+    dist = skip_diag_strided(dist)
+    a_tmp = np.min(dist, axis=1)
+    a = 1/max(a_tmp)
+    print(a)
+    # zheng
+    # points_org = np.loadtxt('datafile/verts_ce_afterpose.txt')
+    # points = points_org
+    # a = 0.005
+    alpha_shape = alphashape.alphashape(points, a)
+
+
+    x = alpha_shape.exterior.xy[0]
+    y = alpha_shape.exterior.xy[1]
+    # for i in range(len(alpha_shape)):
+    #     x_tmp, y_tmp = alpha_shape[i].exterior.coords.xy
+    #     for j in range(len(x_tmp)):
+    #         x.append(x_tmp[j])
+    #     for k in range(len(y_tmp)):
+    #         y.append(y_tmp[k])
+
+    idx = []
+    for i in range(len(x)):
+        t = np.where(points_org[:,0] == x[i])
+        if points_org[t[0][0],1] == y[i]:
+            idx.append(int(t[0][0]))
+        elif points_org[t[0][1],1] == y[i]:
+            idx.append(int(t[0][0]))
+
+    return idx
+    # np.savetxt("datafile/contours_ce_idx.txt", np.c_[idx],fmt = '%d')
+
+
+def project_test(points, camera_transform_np, FOCAL_LENGTH, cx, cy):
+
+    device = points.device
+    dtype = torch.float32
+    batch_size = 1
+    focal_length_x = None
+    focal_length_y = None
+    # FOCAL_LENGTH = 3370.57643853392 # 3417.76998219510
+
+    focal_length_x = torch.full(
+        [batch_size],
+        FOCAL_LENGTH if focal_length_x is None else
+        focal_length_x,
+        dtype=dtype)
+
+    
+    focal_length_y = torch.full(
+        [batch_size],
+        FOCAL_LENGTH if focal_length_y is None else
+        focal_length_y,
+        dtype=dtype)
+
+
+    with torch.no_grad():
+        camera_mat = torch.zeros([batch_size, 2, 2],
+                                    dtype=torch.float32, device=points.device)
+        camera_mat[:, 0, 0] = focal_length_x
+        camera_mat[:, 1, 1] = focal_length_y
+
+
+    camera_transform = torch.from_numpy(camera_transform_np)
+    camera_transform = camera_transform.to(device)
+
+    center_np = np.array([[[cx, cy]]],dtype=np.float32)
+
+    center = torch.from_numpy(center_np)
+    center = center.to(device)
+
+    # camera_transform = transform_mat(rotation, translation.unsqueeze(dim=-1))
+
+    homog_coord = torch.ones(list(points.shape)[:-1] + [1],
+                                dtype=points.dtype,
+                                device=device)
+
+    # Convert the points to homogeneous coordinates
+    points_h = torch.cat([points, homog_coord], dim=-1)
+
+    projected_points = torch.einsum('bki,bji->bjk',
+                                    [camera_transform, points_h])
+
+    img_points = torch.div(projected_points[:, :, :2],
+                            projected_points[:, :, 2].unsqueeze(dim=-1))
+    img_points = torch.einsum('bki,bji->bjk', [camera_mat, img_points]) + center.unsqueeze(dim=1)
+    return img_points
+
+
+
+if __name__ == '__main__':
+
+    device = torch.device('cpu')
+    body_model = smplx.create(model_path= r'C:\Users\20630\Desktop\alpha-shape\SMPLX_MALE.npz', model_type='smplx')             # 这个路径需要改一下
+    body_model = body_model.to(device)
+    body_model_output = body_model(return_verts=True, return_full_pose=False)
+
+    camera_transform_front_np = np.array([([[ 0.61226051, -0.01524329,  0.00866069, -0.03863354],
+                                        [-0.01649946, -0.60328956,  0.10459332, -0.2442243 ],
+                                        [ 0.00592733, -0.10478376, -0.603453  ,  1.3023409 ],
+                                        [ 0.        ,  0.        ,  0.        ,  1.        ]])],dtype=np.float32)
+
+    focal_length = 4828.4271247461902
+    cx = 1125.
+    cy = 2000.
+
+    verts_tmp = project_test(body_model_output.vertices, camera_transform_front_np, focal_length,cx,cy) 
+    verts_tmp = verts_tmp.squeeze(dim=0)
+    verts_tmp = verts_tmp.squeeze(dim=0)
+    verts_tmp_np = verts_tmp.cpu().detach().numpy()                 # 原始smpl模型投影点
+    idx = point_alphashape(verts_tmp_np, delete_arm=False)
+    contours_front = verts_tmp[idx]
+    contours_front_np = contours_front.cpu().detach().numpy()       # alphashape处理后轮廓点
+
+    np.savetxt('org_smpl.txt', np.c_[verts_tmp_np])
+    np.savetxt('contours_smpl.txt', np.c_[contours_front_np])
+
+    plt.figure('contours_ce')
+    plt.scatter(verts_tmp_np[:,0],verts_tmp_np[:,1],marker='.',s=1,c='b')
+    plt.scatter(contours_front_np[:,0],contours_front_np[:,1],marker='.',s=1,c='r')
+    plt.axis('equal')
